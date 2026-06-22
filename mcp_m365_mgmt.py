@@ -3,6 +3,7 @@ import asyncio
 from azure.identity import DefaultAzureCredential, InteractiveBrowserCredential, ClientSecretCredential
 import requests
 import os
+import base64
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -1652,6 +1653,133 @@ def create_odf_document(location_type: str, location_id: str, file_name: str, do
         }
     else:
         return {"error": response.text, "status_code": response.status_code}
+
+@mcp.tool()
+def list_mac_custom_attributes():
+    """Lists all macOS custom attribute shell scripts in Intune."""
+    access_token = get_access_token()
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json"
+    }
+    response = requests.get(
+        "https://graph.microsoft.com/beta/deviceManagement/deviceCustomAttributeShellScripts",
+        headers=headers
+    )
+    if response.status_code == 200:
+        result = response.json()
+        attributes = []
+        for attr in result.get("value", []):
+            attributes.append({
+                "id": attr.get("id"),
+                "displayName": attr.get("displayName"),
+                "description": attr.get("description"),
+                "fileName": attr.get("fileName"),
+                "customAttributeName": attr.get("customAttributeName"),
+                "customAttributeType": attr.get("customAttributeType"),
+                "runAsAccount": attr.get("runAsAccount"),
+                "createdDateTime": attr.get("createdDateTime"),
+                "lastModifiedDateTime": attr.get("lastModifiedDateTime")
+            })
+        return {"customAttributes": attributes, "count": len(attributes)}
+    else:
+        return {"error": response.text, "status_code": response.status_code}
+
+
+@mcp.tool()
+def get_mac_custom_attribute_results(attribute_name: str):
+    """Gets device results for a specific macOS custom attribute by name (e.g., ca-browser-inventory)."""
+    access_token = get_access_token()
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json"
+    }
+
+    # 先找到對應的自訂屬性 ID
+    list_response = requests.get(
+        "https://graph.microsoft.com/beta/deviceManagement/deviceCustomAttributeShellScripts",
+        headers=headers
+    )
+    if list_response.status_code != 200:
+        return {"error": list_response.text, "status_code": list_response.status_code}
+
+    attribute_id = None
+    for attr in list_response.json().get("value", []):
+        if attr.get("customAttributeName") == attribute_name or attr.get("displayName") == attribute_name:
+            attribute_id = attr.get("id")
+            break
+
+    if not attribute_id:
+        return {"error": f"找不到名稱為 '{attribute_name}' 的自訂屬性"}
+
+    # 取得各裝置的回報結果
+    results_response = requests.get(
+        f"https://graph.microsoft.com/beta/deviceManagement/deviceCustomAttributeShellScripts/{attribute_id}/deviceRunStates?$expand=managedDevice&$select=id,resultMessage,runState,errorCode,lastStateUpdateDateTime,managedDevice",
+        headers=headers
+    )
+    if results_response.status_code != 200:
+        return {"error": results_response.text, "status_code": results_response.status_code}
+
+    device_results = []
+    for state in results_response.json().get("value", []):
+        device_results.append({
+            "deviceName": state.get("managedDevice", {}).get("deviceName") if state.get("managedDevice") else state.get("id"),
+            "resultValue": state.get("resultMessage"),
+            "state": state.get("runState"),
+            "errorCode": state.get("errorCode"),
+            "lastStateUpdateDateTime": state.get("lastStateUpdateDateTime")
+        })
+
+    return {"attributeName": attribute_name, "devices": device_results, "count": len(device_results)}
+
+
+@mcp.tool()
+def update_mac_custom_attribute_script(attribute_name: str, script_path: str):
+    """Updates the shell script content of a macOS custom attribute in Intune by name and local file path."""
+    if not os.path.isfile(script_path):
+        return {"error": f"找不到本機檔案：{script_path}"}
+
+    access_token = get_access_token()
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json"
+    }
+
+    list_response = requests.get(
+        "https://graph.microsoft.com/beta/deviceManagement/deviceCustomAttributeShellScripts",
+        headers=headers
+    )
+    if list_response.status_code != 200:
+        return {"error": list_response.text, "status_code": list_response.status_code}
+
+    attribute_id = None
+    for attr in list_response.json().get("value", []):
+        if attr.get("customAttributeName") == attribute_name or attr.get("displayName") == attribute_name:
+            attribute_id = attr.get("id")
+            break
+
+    if not attribute_id:
+        return {"error": f"找不到名稱為 '{attribute_name}' 的自訂屬性"}
+
+    with open(script_path, "rb") as f:
+        content_b64 = base64.b64encode(f.read()).decode("utf-8")
+
+    patch_response = requests.patch(
+        f"https://graph.microsoft.com/beta/deviceManagement/deviceCustomAttributeShellScripts/{attribute_id}",
+        headers=headers,
+        json={"scriptContent": content_b64}
+    )
+    if patch_response.status_code in (200, 204):
+        result = patch_response.json() if patch_response.text else {}
+        return {
+            "success": True,
+            "attributeName": attribute_name,
+            "attributeId": attribute_id,
+            "lastModifiedDateTime": result.get("lastModifiedDateTime")
+        }
+    else:
+        return {"error": patch_response.text, "status_code": patch_response.status_code}
+
 
 async def async_main():
     """Async entry point for MCP server."""

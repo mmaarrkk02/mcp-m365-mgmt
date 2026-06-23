@@ -1781,6 +1781,160 @@ def update_mac_custom_attribute_script(attribute_name: str, script_path: str):
         return {"error": patch_response.text, "status_code": patch_response.status_code}
 
 
+@mcp.tool()
+def list_apple_dep_tokens():
+    """Lists all Apple DEP (ADE) onboarding settings (Apple MDM tokens) configured in Intune."""
+    access_token = get_access_token()
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json"
+    }
+    response = requests.get(
+        "https://graph.microsoft.com/beta/deviceManagement/depOnboardingSettings",
+        headers=headers
+    )
+    if response.status_code != 200:
+        return {"error": response.text, "status_code": response.status_code}
+
+    tokens = []
+    for t in response.json().get("value", []):
+        tokens.append({
+            "id": t.get("id"),
+            "appleIdentifier": t.get("appleIdentifier"),
+            "tokenName": t.get("tokenName"),
+            "tokenType": t.get("tokenType"),
+            "tokenExpirationDateTime": t.get("tokenExpirationDateTime"),
+            "lastModifiedDateTime": t.get("lastModifiedDateTime"),
+            "lastSuccessfulSyncDateTime": t.get("lastSuccessfulSyncDateTime"),
+            "syncedDeviceCount": t.get("syncedDeviceCount"),
+            "dataSharingConsentGranted": t.get("dataSharingConsentGranted"),
+        })
+    return {"depTokens": tokens, "count": len(tokens)}
+
+
+@mcp.tool()
+def list_apple_ade_profiles(dep_token_id: str = ""):
+    """Lists Apple ADE enrollment profiles. If dep_token_id is omitted, lists profiles across all DEP tokens."""
+    access_token = get_access_token()
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json"
+    }
+
+    # 取得要查詢的 token id 清單
+    if dep_token_id:
+        token_ids = [dep_token_id]
+    else:
+        r = requests.get(
+            "https://graph.microsoft.com/beta/deviceManagement/depOnboardingSettings",
+            headers=headers
+        )
+        if r.status_code != 200:
+            return {"error": r.text, "status_code": r.status_code}
+        token_ids = [t.get("id") for t in r.json().get("value", [])]
+
+    all_profiles = []
+    for tid in token_ids:
+        r = requests.get(
+            f"https://graph.microsoft.com/beta/deviceManagement/depOnboardingSettings/{tid}/enrollmentProfiles",
+            headers=headers
+        )
+        if r.status_code != 200:
+            continue
+        for p in r.json().get("value", []):
+            all_profiles.append({
+                "id": p.get("id"),
+                "depTokenId": tid,
+                "displayName": p.get("displayName"),
+                "description": p.get("description"),
+                "platform": p.get("platform"),
+                "isDefault": p.get("isDefault"),
+                "isMandatory": p.get("isMandatory"),
+                "requiresUserAuthentication": p.get("requiresUserAuthentication"),
+                "supervisedModeEnabled": p.get("supervisedModeEnabled"),
+                "supportDepartment": p.get("supportDepartment"),
+                "supportPhoneNumber": p.get("supportPhoneNumber"),
+                "configurationEndpointUrl": p.get("configurationEndpointUrl"),
+                "createdDateTime": p.get("createdDateTime"),
+                "lastModifiedDateTime": p.get("lastModifiedDateTime"),
+            })
+    return {"profiles": all_profiles, "count": len(all_profiles)}
+
+
+@mcp.tool()
+def get_apple_ade_profile(dep_token_id: str, profile_id: str):
+    """Gets the details of a specific Apple ADE enrollment profile."""
+    access_token = get_access_token()
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json"
+    }
+    r = requests.get(
+        f"https://graph.microsoft.com/beta/deviceManagement/depOnboardingSettings/{dep_token_id}/enrollmentProfiles/{profile_id}",
+        headers=headers
+    )
+    if r.status_code != 200:
+        return {"error": r.text, "status_code": r.status_code}
+    return r.json()
+
+
+@mcp.tool()
+def list_apple_ade_devices(dep_token_id: str):
+    """Lists Apple ADE (DEP) devices synced under a specific DEP token."""
+    access_token = get_access_token()
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json"
+    }
+    devices = []
+    url = f"https://graph.microsoft.com/beta/deviceManagement/depOnboardingSettings/{dep_token_id}/importedAppleDeviceIdentities"
+    while url:
+        r = requests.get(url, headers=headers)
+        if r.status_code != 200:
+            return {"error": r.text, "status_code": r.status_code}
+        j = r.json()
+        for d in j.get("value", []):
+            devices.append({
+                "id": d.get("id"),
+                "serialNumber": d.get("serialNumber"),
+                "requestedEnrollmentProfileId": d.get("requestedEnrollmentProfileId"),
+                "requestedEnrollmentProfileAssignmentDateTime": d.get("requestedEnrollmentProfileAssignmentDateTime"),
+                "assignedUserPrincipalName": d.get("assignedUserPrincipalName"),
+                "enrollmentState": d.get("enrollmentState"),
+                "platform": d.get("platform"),
+                "discoverySource": d.get("discoverySource"),
+                "lastContactedDateTime": d.get("lastContactedDateTime"),
+                "description": d.get("description"),
+            })
+        url = j.get("@odata.nextLink")
+    return {"devices": devices, "count": len(devices)}
+
+
+@mcp.tool()
+def assign_apple_ade_profile(dep_token_id: str, profile_id: str, device_ids: list):
+    """Assigns an Apple ADE enrollment profile to one or more ADE devices by their importedAppleDeviceIdentity IDs."""
+    access_token = get_access_token()
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json"
+    }
+    body = {"deviceIds": device_ids}
+    r = requests.post(
+        f"https://graph.microsoft.com/beta/deviceManagement/depOnboardingSettings/{dep_token_id}/enrollmentProfiles/{profile_id}/updateDeviceProfileAssignment",
+        headers=headers,
+        json=body
+    )
+    if r.status_code in (200, 204):
+        return {
+            "success": True,
+            "depTokenId": dep_token_id,
+            "profileId": profile_id,
+            "assignedDeviceCount": len(device_ids),
+        }
+    else:
+        return {"error": r.text, "status_code": r.status_code}
+
+
 async def async_main():
     """Async entry point for MCP server."""
     import sys
